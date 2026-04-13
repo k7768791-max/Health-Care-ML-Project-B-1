@@ -1,11 +1,13 @@
 import Navbar from "../components/Navbar"
 import Footer from "../components/Footer"
-import { useContext, useState } from "react"
+import { useContext, useState, useEffect } from "react"
 import { AuthContext } from "../context/AuthContext"
 import axios from "axios"
 import { FaBrain, FaCheckCircle, FaExclamationTriangle, FaTimesCircle, FaShieldAlt } from "react-icons/fa"
 import { db } from "../firebase"
 import { collection, addDoc, serverTimestamp } from "firebase/firestore"
+
+const BACKEND_URL = "https://batch-1-backend.onrender.com"
 
 function Model() {
   const { user, login } = useContext(AuthContext)
@@ -13,6 +15,7 @@ function Model() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const [firestoreSuccess, setFirestoreSuccess] = useState(false)
+  const [backendReady, setBackendReady] = useState(false)
 
   const [formData, setFormData] = useState({
     patientName: "",
@@ -26,6 +29,22 @@ function Model() {
     procedure: "",
     diagnosis: ""
   })
+
+  // =========================================================
+  // WARM-UP PING — wakes Render free-tier on page load
+  // =========================================================
+  useEffect(() => {
+    const warmUp = async () => {
+      try {
+        await axios.get(`${BACKEND_URL}/`, { timeout: 30000 })
+        setBackendReady(true)
+      } catch {
+        // Server may be waking up — silently fail, user can still try submitting
+        setBackendReady(true)
+      }
+    }
+    warmUp()
+  }, [])
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value })
@@ -63,11 +82,14 @@ function Model() {
       }
 
       // 2. Fetch Prediction from ML Backend (Safe, Anonymous Payload)
-      const res = await axios.post("https://batch-1-backend.onrender.com/predict", diagnosticData)
+      const res = await axios.post(`${BACKEND_URL}/predict`, diagnosticData, {
+        headers: { "Content-Type": "application/json" },
+        timeout: 60000  // 60s — Render cold starts can be slow
+      })
       const aiResult = res.data
       setResult(aiResult)
 
-      // 3. Save Full Patient Record + AI Result to Firebase database
+      // 3. Save Full Patient Record + AI Result to Firebase
       await addDoc(collection(db, "patient_records"), {
         patientName: formData.patientName,
         patientId: formData.patientId,
@@ -78,7 +100,7 @@ function Model() {
         timestamp: serverTimestamp(),
         processedBy: user.email || "Hospital Admin"
       })
-      
+
       setFirestoreSuccess(true)
 
       const updatedUser = {
@@ -86,38 +108,34 @@ function Model() {
         usage: (user.usage || 0) + 1
       }
       login(updatedUser)
-    }catch (err) {
 
-  console.error("FULL ERROR:", err)
+    } catch (err) {
+      console.error("FULL ERROR:", err)
 
-  // Backend error (Flask)
-  if (err.response) {
-
-    console.error("Backend Response:", err.response.data)
-
-    setError(
-      `Backend Error: ${err.response.data.error || "Unknown backend error"}`
-    )
-
-  }
-  
-  // Firebase error
-  else if (err.code) {
-
-    console.error("Firebase Error:", err.code)
-
-    setError(`Firebase Error: ${err.message}`)
-
-  }
-  
-  // Connection error
-  else {
-
-    console.error("Connection Error:", err)
-
-    setError("Connection failed. Check backend or Firebase.")
-
-  }
+      if (err.code === "ECONNABORTED" || err.message?.includes("timeout")) {
+        // Render free tier was still waking up
+        setError(
+          "Request timed out — the server may be waking up. Please wait 30 seconds and try again."
+        )
+      } else if (err.response) {
+        // Flask returned an error response
+        console.error("Backend Response:", err.response.data)
+        setError(
+          `Backend Error: ${err.response.data.error || "Unknown backend error"}`
+        )
+      } else if (err.code) {
+        // Firebase error
+        console.error("Firebase Error:", err.code)
+        setError(`Firebase Error: ${err.message}`)
+      } else if (err.message === "Network Error") {
+        // CORS or server down
+        setError(
+          "Network Error: Could not reach the backend. The server may still be waking up — please try again in 30 seconds."
+        )
+      } else {
+        console.error("Connection Error:", err)
+        setError("Connection failed. Check backend or Firebase.")
+      }
 
     } finally {
       setLoading(false)
@@ -141,11 +159,25 @@ function Model() {
           <p className="text-slate-400 max-w-xl mx-auto text-lg pt-2">
             Securely enter patient medical data. PII is decoupled and stripped prior to prediction. All results are securely logged to the Patient Database.
           </p>
+
+          {/* Backend warm-up status indicator */}
+          {!backendReady && (
+            <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-full bg-amber-500/10 border border-amber-500/20">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+              <p className="text-amber-300 text-sm">Waking up AI server — this takes ~30s on first load...</p>
+            </div>
+          )}
+          {backendReady && (
+            <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/20">
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <p className="text-emerald-300 text-sm">AI server is ready</p>
+            </div>
+          )}
         </div>
 
         <div className="card w-full shadow-[0_0_30px_rgba(30,41,59,0.5)] border-white/10 p-8 mb-10">
           <form onSubmit={predict} className="space-y-6">
-            
+
             {/* Sec: Patient Identifier block */}
             <h3 className="text-lg font-bold text-white border-b border-white/10 pb-2 mb-4">Patient Identifiers (Kept Local)</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -282,11 +314,14 @@ function Model() {
           )}
 
           {result && (
-            <div className={`mt-8 backdrop-blur-md rounded-xl border overflow-hidden shadow-lg ${result.status === 'APPROVED' ? 'bg-emerald-900/30 border-emerald-500/30 shadow-[0_0_20px_rgba(16,185,129,0.15)]' :
-                result.status === 'DENIED' ? 'bg-red-900/30 border-red-500/30 shadow-[0_0_20px_rgba(239,68,68,0.15)]' :
-                  'bg-amber-900/30 border-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.15)]'
-              }`}>
-              
+            <div className={`mt-8 backdrop-blur-md rounded-xl border overflow-hidden shadow-lg ${
+              result.status === 'APPROVED'
+                ? 'bg-emerald-900/30 border-emerald-500/30 shadow-[0_0_20px_rgba(16,185,129,0.15)]'
+                : result.status === 'DENIED'
+                ? 'bg-red-900/30 border-red-500/30 shadow-[0_0_20px_rgba(239,68,68,0.15)]'
+                : 'bg-amber-900/30 border-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.15)]'
+            }`}>
+
               <div className="p-6">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
                   <div className="flex items-start gap-4">
@@ -299,10 +334,14 @@ function Model() {
                     )}
 
                     <div>
-                      <p className="text-slate-300 text-sm mb-1 uppercase tracking-wider font-semibold">Diagnosis Complete for {formData.patientName}</p>
-                      <p className={`font-bold text-2xl drop-shadow-sm ${result.status === 'APPROVED' ? 'text-emerald-400' :
-                          result.status === 'DENIED' ? 'text-red-400' : 'text-amber-400'
-                        }`}>
+                      <p className="text-slate-300 text-sm mb-1 uppercase tracking-wider font-semibold">
+                        Diagnosis Complete for {formData.patientName}
+                      </p>
+                      <p className={`font-bold text-2xl drop-shadow-sm ${
+                        result.status === 'APPROVED' ? 'text-emerald-400'
+                        : result.status === 'DENIED' ? 'text-red-400'
+                        : 'text-amber-400'
+                      }`}>
                         {result.status}
                       </p>
                       <p className="text-slate-300 mt-2 font-medium">
@@ -323,7 +362,9 @@ function Model() {
               {firestoreSuccess && (
                 <div className="bg-slate-900/80 px-6 py-3 border-t border-white/5 flex items-center gap-2">
                   <FaShieldAlt className="text-cyan-400" />
-                  <p className="text-sm text-slate-300 font-medium tracking-wide">Patient Record and AI Diagnostic successfully appended to secure Firebase Database.</p>
+                  <p className="text-sm text-slate-300 font-medium tracking-wide">
+                    Patient Record and AI Diagnostic successfully appended to secure Firebase Database.
+                  </p>
                 </div>
               )}
             </div>
