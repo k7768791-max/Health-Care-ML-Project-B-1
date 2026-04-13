@@ -63,7 +63,7 @@ function Model() {
       }
 
       // 2. Fetch Prediction from ML Backend (Safe, Anonymous Payload)
-      const res = await axios.post("http://localhost:5000/predict", diagnosticData)
+      const res = await axios.post("https://batch-1-backend.onrender.com/predict", diagnosticData)
       const aiResult = res.data
       setResult(aiResult)
 
